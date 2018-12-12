@@ -17,8 +17,14 @@ executable ebird
 
   ghc-options: -threaded -rtsopts -O2 -fno-warn-partial-type-signatures
 
+  other-modules:
+    Data
+
   build-depends:
     base,
     bytestring,
     containers,
-    http-conduit
+    directory,
+    filepath,
+    http-conduit,
+    utf8-string

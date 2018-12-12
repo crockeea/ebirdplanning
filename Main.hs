@@ -1,14 +1,59 @@
+{-# LANGUAGE RecordWildCards #-}
+
+import Data
 
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Char8 as C
-import Data.List (intersperse, sortOn, reverse, stripPrefix)
-import Data.Map hiding (splitAt,drop,map,take)
-import Data.Maybe (catMaybes)
+import Data.List (intersperse, sortOn, reverse, partition, stripPrefix, delete, filter, groupBy)
+import Data.Map hiding (splitAt,drop,map,take,delete,filter,partition)
 import qualified Data.Set as S
-import Data.Tuple (swap)
 import GHC.IO.Encoding
-import Network.HTTP.Conduit
+import System.Directory (listDirectory)
 import System.IO
+
+hotspots :: [Hotspot]
+hotspots = 
+  let nameToHS region hsName = 
+        if member hsName nameMapping
+        then HS{code=nameMapping!hsName,..}
+        else error hsName
+      regionList = [
+       ("neahBay", neahBay),
+       ("portAngeles", portAngeles),
+       ("lakeCrescent", lakeCrescent),
+       ("highOlympics", highOlympics),
+       ("portTownsend", portTownsend),
+       ("kitsapPeninsula", kitsapPeninsula),
+       ("whidbeyIsland", whidbeyIsland),
+       ("discoveryBay", discoveryBay),
+       ("dungeness", dungeness)]
+  in concatMap (\(str,lst) -> nameToHS str <$> lst) regionList
+
+histograms :: IO (Map Hotspot (Map String Double))
+histograms = do
+  -- histpairs :: [(Hotspot,(Int,Map))]
+  histpairs <- zip hotspots <$> mapM readHistogram hotspots
+  let groupedHSs :: [[(Hotspot,(Int,Map String Double))]]
+      groupedHSs = groupBy (\a b -> region (fst a) == region (fst b)) histpairs
+      sortedGroups :: [([(Hotspot,(Int,Map String Double))],[(Hotspot,(Int,Map String Double))])]
+      sortedGroups = partition ((< 5) . fst . snd) <$> groupedHSs
+      printStats (a,b) = 
+        print $ region (fst $ head b) ++ ": Keeping " ++ show (length b) ++ "/" ++ show (length a)
+  mapM_ printStats sortedGroups
+  let largeMaps = concat $ snd <$> sortedGroups
+
+  return $ fromList $ (\(a,(b,c)) -> (a,c)) <$> largeMaps
+
+main :: IO ()
+main = do
+
+  setLocaleEncoding utf8
+ --putStrLn $ "Neah Bay—The Wedge"
+  _ <- histograms
+  putStrLn "done"
+
+
+
 
 neahBay :: [String]
 neahBay = [
@@ -228,7 +273,6 @@ kitsapPeninsula = [
 
 whidbeyIsland :: [String]
 whidbeyIsland = []
-  
 
 
 
@@ -237,66 +281,16 @@ whidbeyIsland = []
 
 
 
-data Hotspot = HS {region::String, hsName::String, code::String}
 
 
 
-neahBay :: [String]
-neahBay = ["L267161", "L267164", "L6517534","L800185"] {-, "L1209931","L3076841","L1585910",
-           "L3075713","L2818141","L5253818","L1803694","L3075795","L5254015","L1567344",
-           "L3853712","L6579451","L3374604","L2180292","L2763900","L6299347","L5056186"]-}
-
-highOlympics :: [String]
-highOlympics = ["L4176035","L1004137","L982949","L4167863","L608380","L1482533",
-                "L1225268","L967793","L276737","L1777266","L4956910","L3746131",
-                "L1512139","L4741791","L4167881","L3761589"]
 
 
-hotspotToURL :: String -> String
-hotspotToURL hid = 
-  "https://ebird.org/barchartData?r=" ++ hid ++ 
-  "&bmo=1&emo=12&byr=1900&eyr=2018&fmt=tsv"
 
-parseLine :: String -> (String, Double)
-parseLine str = 
-  -- split the line into words
-  let ws = words str
-  in if length ws < 49 -- one word name plus 48 data values
-     then error $ "line too short!\n\n" ++ str
-     else 
-       let (birdname,vals) = splitAt (length ws - 48) ws
-           bird = concat $ intersperse "-" birdname
-           -- read the value for the first week of August
-           augVal = read $ vals !! 28
-       in (bird,augVal)
 
-createHotspot :: String -> IO (Map String Double)
-createHotspot hid = do
-  putStrLn $ "Parsing " ++ hotspotToURL hid
-  rawData <- C.unpack <$> simpleHttp (hotspotToURL hid)
-  -- raw files include 14 lines of cruft
-  -- then one blank line
-  -- then the number of checklists for each month
-  -- followed by the data for each bird
-  -- followed by two empty lines
-      -- split each line into a separate string,
-      -- then drop the first 14 lines and the last two lines
-  let rawData' = init $ init $ drop 14 $ lines rawData
-      -- skip the second. The rest of the lines
-      -- have some string at the left followed by 48 numbers (4 for each month)
-      dataLines = head rawData' : drop 2 rawData'
-  -- parse each line, dropping unwanted columns
-  -- and convert to a map
-  return $ fromList $ parseLine <$> dataLines
 
-filterSmallHotspots :: Map String (Map String Double) -> IO [Map String Double]
-filterSmallHotspots m = do
-  let (small,large) = partition ((<5) . (! "Sample-Size:")) m
-      small' = round <$> (! "Sample-Size:") <$> small :: Map String Int
-      large' = round <$> (! "Sample-Size:") <$> large :: Map String Int
-  putStrLn $ "Dropping " ++ show (length (keys small)) ++ " hotspots: " ++ show small'
-  putStrLn $ "Keeping " ++ show (length (keys large)) ++ " hotspots: " ++ show large'
-  return $ elems large
+{-
+
 
 mapToFile :: Map String Double -> String
 mapToFile m = 
@@ -304,6 +298,12 @@ mapToFile m =
       strData = (show <$>) <$> sortedData
       birdLines = concat <$> intersperse "\t" <$> (\(a,b)->[a,b]) <$> strData
   in unlines birdLines
+
+
+
+
+
+
 
 -- process all hotspots in one region and report the maximum 
 -- probability of each bird at any of the hotspots, ignoring 
@@ -321,41 +321,6 @@ processArea hotspotIDs = do
   let finalMap = unionsWith max largeHSMap
   -- write the data to a file
   return finalMap
-
-processAreas :: IO ()
-processAreas = do
-  neahMap <- processArea  neahBay
-  writeFile ("neahbay.txt") $ mapToFile neahMap
-
-  olympicsMap <- processArea  highOlympics
-  writeFile ("higholympics.txt") $ mapToFile olympicsMap
-
---computeTargets :: Map String (Map String Double) -> Map String (Map String Double)
---computeTargets
-  -- a target bird is one that
-  --   1) doesn't appear on all/half/? of areas
-  --   2) has a significantly higher probability in one area than another
-  --   3) 
+-}
 
 
-getHotspotMapping :: IO (Map String String)
-getHotspotMapping = do
-  rawData <- C.unpack <$> simpleHttp
-               "https://ebird.org/GuideMe?reportType=location&bMonth=08&bYear=1900&eMonth=08&eYear=2018&parentState=US-WA&countries=US&states=US-WA&getLocations=hotspots&continue.x=31&continue.y=6"
-  -- writeFile "idmap.txt" rawData
-  let rawData' = lines rawData
-      mapLinePrefix = "\t\t\t\t\t\t\t\t<td valign=\"top\"><input type=\"checkbox\" name=\"hotspots\" value=\""
-      mapLines = catMaybes $ (stripPrefix mapLinePrefix) <$> rawData'
-      parseMapping str = 
-        let (lhs,rhs) = span (/= '\"') str
-        in (lhs, drop 4 $ take (length rhs - 5) rhs)
-      parsedLines = swap <$> parseMapping <$> mapLines
-  -- putStrLn $ show parsedLines
-  return $ fromList parsedLines
-
-main :: IO ()
-main = do
-  setLocaleEncoding utf8
-  hotspotMap <- getHotspotMapping
-  processAreas
-  
