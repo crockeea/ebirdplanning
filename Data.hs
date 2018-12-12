@@ -55,9 +55,7 @@ readOrDownload dir filePath parse url = do
   fexists <- doesFileExist fullPath
   parse <$> 
     if fexists
-    then do
-      putStrLn $ "Reading " ++ fullPath
-      readFile fullPath
+    then readFile fullPath
     else do
       putStrLn $ "Downloading " ++ filePath
       rawData <- U.decode <$> C.unpack <$> simpleHttp url

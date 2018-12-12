@@ -1,12 +1,16 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 import Data
 
+import Control.Arrow ((***))
+import Control.Monad (join)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.List (intersperse, sortOn, reverse, partition, stripPrefix, delete, filter, groupBy)
 import Data.Map hiding (splitAt,drop,map,take,delete,filter,partition)
 import qualified Data.Set as S
+import Data.Tuple (swap)
 import GHC.IO.Encoding
 import System.Directory (listDirectory)
 import System.IO
@@ -29,6 +33,12 @@ hotspots =
        ("dungeness", dungeness)]
   in concatMap (\(str,lst) -> nameToHS str <$> lst) regionList
 
+updateKeys :: (Ord k, Ord k') => (k -> k') -> Map k a -> Map k' a
+updateKeys f m = 
+  let l = swap <$> toList m
+      l' = swap <$> (f <$>) <$> l
+  in fromList l'
+
 histograms :: IO (Map Hotspot (Map String Double))
 histograms = do
   -- histpairs :: [(Hotspot,(Int,Map))]
@@ -38,21 +48,56 @@ histograms = do
       sortedGroups :: [([(Hotspot,(Int,Map String Double))],[(Hotspot,(Int,Map String Double))])]
       sortedGroups = partition ((< 5) . fst . snd) <$> groupedHSs
       printStats (a,b) = 
-        print $ region (fst $ head b) ++ ": Keeping " ++ show (length b) ++ "/" ++ show (length a)
+        putStrLn $ region (fst $ head b) ++ ": Keeping " ++ show (length b) ++ "/" ++ show (length a)
   mapM_ printStats sortedGroups
+  putStrLn $ "Total: Kept " ++ show (sum $ length <$> snd <$> sortedGroups) ++ "/" ++ show (length histpairs) ++ " hotspots"
+  let volHSs' = join (***) concat $ unzip sortedGroups
+      -- remove the checklist count
+      volHSs@(loVolMaps, hiVolMaps) = join (***) (map (snd <$>)) volHSs'
+      (loVolKeys, hiVolKeys) = 
+        join (***) (S.unions . map (keysSet . snd)) volHSs
+      loVolOnly = loVolKeys S.\\ hiVolKeys
+  putStrLn $ "Number of birds only seen at low-volume hotspots: " ++ show (length loVolOnly)
+  let loVolRare = map (flip restrictKeys loVolOnly <$>) loVolMaps
+      -- adjust bird name to indicate a rarity
+      loVolRare' = (updateKeys ("RARE"++) <$>) <$> loVolRare
+  putStrLn $ show loVolRare
   let largeMaps = concat $ snd <$> sortedGroups
 
-  return $ fromList $ (\(a,(b,c)) -> (a,c)) <$> largeMaps
+  return $ fromList $ loVolRare' ++ hiVolMaps
 
 main :: IO ()
 main = do
 
   setLocaleEncoding utf8
- --putStrLn $ "Neah Bay—The Wedge"
   _ <- histograms
   putStrLn "done"
 
+{-
+mapToFile :: Map String Double -> String
+mapToFile m = 
+  let sortedData = reverse $ dropWhile ((<0.25) . snd) $ sortOn snd $ toList m
+      strData = (show <$>) <$> sortedData
+      birdLines = concat <$> intersperse "\t" <$> (\(a,b)->[a,b]) <$> strData
+  in unlines birdLines
 
+-- process all hotspots in one region and report the maximum 
+-- probability of each bird at any of the hotspots, ignoring 
+-- spots with only a few checklists for the target week
+processArea :: [String] -> IO (Map String Double)
+processArea hotspotIDs = do
+  -- create a map from hotspot ID to the processed data for that
+  -- hotspot (a map from bird name to probability for that bird 
+  -- in the first week of August)
+  hsMap <- sequence $ fromSet createHotspot $ S.fromList hotspotIDs
+  -- filter out hotspots which don't have enough checklists
+  largeHSMap <- filterSmallHotspots hsMap
+  -- merge the data from the remaining hotspots to find the maximum
+  -- probability for each bird at *any* hotspot in the region
+  let finalMap = unionsWith max largeHSMap
+  -- write the data to a file
+  return finalMap
+-}
 
 
 neahBay :: [String]
@@ -273,54 +318,3 @@ kitsapPeninsula = [
 
 whidbeyIsland :: [String]
 whidbeyIsland = []
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-{-
-
-
-mapToFile :: Map String Double -> String
-mapToFile m = 
-  let sortedData = reverse $ dropWhile ((<0.25) . snd) $ sortOn snd $ toList m
-      strData = (show <$>) <$> sortedData
-      birdLines = concat <$> intersperse "\t" <$> (\(a,b)->[a,b]) <$> strData
-  in unlines birdLines
-
-
-
-
-
-
-
--- process all hotspots in one region and report the maximum 
--- probability of each bird at any of the hotspots, ignoring 
--- spots with only a few checklists for the target week
-processArea :: [String] -> IO (Map String Double)
-processArea hotspotIDs = do
-  -- create a map from hotspot ID to the processed data for that
-  -- hotspot (a map from bird name to probability for that bird 
-  -- in the first week of August)
-  hsMap <- sequence $ fromSet createHotspot $ S.fromList hotspotIDs
-  -- filter out hotspots which don't have enough checklists
-  largeHSMap <- filterSmallHotspots hsMap
-  -- merge the data from the remaining hotspots to find the maximum
-  -- probability for each bird at *any* hotspot in the region
-  let finalMap = unionsWith max largeHSMap
-  -- write the data to a file
-  return finalMap
--}
-
-
