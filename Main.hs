@@ -4,7 +4,7 @@
 import Data
 
 import Control.Arrow ((***))
-import Control.Monad (join)
+import Control.Monad (join, when)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.List (intersperse, sortOn, reverse, partition, stripPrefix, delete, filter, groupBy, dropWhile, reverse)
@@ -13,7 +13,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Tuple (swap)
 import GHC.IO.Encoding
-import Prelude hiding (lookup, null)
+import Prelude hiding (lookup, null, showList)
 import System.Directory (listDirectory)
 import System.IO
 
@@ -31,8 +31,10 @@ histograms = do
   -- histograms include birds seen in *any* week of the year. Many have not been seen
   -- in the first week of August, so let's remove them.
   let filteredHSs = ((M.filter (/=0) <$>) <$>) <$> histpairs
+      -- group the (pre-sorted) histograms by region
       groupedHSs :: [[(Hotspot,(Int,Map String Double))]]
       groupedHSs = groupBy (\a b -> region (fst a) == region (fst b)) filteredHSs
+      -- sort into large and small hotspots
       sortedGroups :: [([(Hotspot,(Int,Map String Double))],[(Hotspot,(Int,Map String Double))])]
       sortedGroups = partition ((< 5) . fst . snd) <$> groupedHSs
       printStats (a,b) = 
@@ -46,6 +48,7 @@ histograms = do
         join (***) (S.unions . map (keysSet . snd)) volHSs
       loVolOnly = loVolKeys S.\\ hiVolKeys
   putStrLn $ "Number of birds only seen at low-volume hotspots: " ++ show (length loVolOnly)
+  showList "" $ S.toList loVolOnly
   let loVolRare = filter (not . null . snd) $ map (flip restrictKeys loVolOnly <$>) loVolMaps
       -- adjust bird name to indicate a rarity
       loVolRare' = (updateKeys ("RARE: "++) <$>) <$> loVolRare
@@ -53,23 +56,80 @@ histograms = do
 
   return $ fromList $ hiVolMaps -- loVolRare' -- ++ 
 
-main :: IO ()
-main = do
-  setLocaleEncoding utf8
+data Category =
+  Common
+  | Target
+  | Rare
+  | Vagrant
+  deriving (Ord,Show,Eq)
+
+categorize :: [(Hotspot, Double)] -> Category
+categorize probs = 
+  case sum $ snd <$> probs of
+    x | x < 0.1   -> Vagrant
+      | x < 0.34  -> Rare
+      | x < 5     -> Target
+      | otherwise -> Common
+
+regionalAnalysis :: IO ()
+regionalAnalysis = do
   hist <- histograms
-      -- already sorted using `toList`, so no need to resort. Just group.
+  -- already sorted using `toList`, so no need to resort. Just group.
   let histGroups = groupWith (region . fst) $ toList hist :: [[(Hotspot,Map String Double)]]
       compressRegion regMaps =
         let regionRepr = fst $ head regMaps
             mapsOnly = snd <$> regMaps
-        in (regionRepr, unionsWith max mapsOnly)
-      compressedHists = fromList $ compressRegion <$> histGroups
-  let str = showTable compressedHists
-  writeFile "out.txt" str
+        in (regionRepr, unionsWith max mapsOnly) :: (Hotspot,Map String Double)
+      compressedHists = fromList $ compressRegion <$> histGroups :: Map Hotspot (Map String Double)
+      birdMap = transposeMaps compressedHists :: Map String (Map Hotspot Double)
+      catMap = invertMap $ (categorize . toList) <$> birdMap
+  showList "Common" $ catMap ! Common
+  showList "Vagrants" $ catMap ! Vagrant
+
+showList :: (Show a) => String -> [a] -> IO ()
+showList str as = do
+  when (str /= "") $ putStrLn str
+  mapM_ (putStrLn . show) as
+  putStrLn "\n\n"
+
+showTable :: Map Hotspot (Map String Double) -> String
+showTable m = 
+  let header = concat $ intersperse "\t" $ "" : (show <$> keys m)
+      invLists = toList <$> transposeMaps m :: Map String [(Hotspot,Double)]
+      -- remove 0s from each row, and sort from largest to smallest
+      invLists' = reverse <$> sortOn snd <$> filter ((>0) . snd) <$> invLists :: Map String [(Hotspot,Double)]
+      -- sort by length of the list
+      invLists'' = sortAndGroup (length . snd) $ toList invLists' -- :: [[(String,[(Hotspot,Double)])]]
+      sortedGroups = concat $ reverse $ sortOn (length . snd . head) $ reverse <$> sortOn (map snd . snd) <$> invLists''
+      dataStrs = showRow <$> sortedGroups
+  in concat $ intersperse "\n" $ header : dataStrs
+
+main :: IO ()
+main = do
+  setLocaleEncoding utf8
+  regionalAnalysis
+  --let str = showTable compressedHists
+  --writeFile "out.txt" str
   putStrLn "done"
 
-invertMap :: forall a b . (Ord b) => Map a (Map b Double) -> Map b (Map a Double)
-invertMap m =
+-- you probably want to sort your input first!
+groupWith :: (Eq b) => (a -> b) -> [a] -> [[a]]
+groupWith f = groupBy (\a b -> f a == f b)
+
+sortAndGroup :: (Eq b, Ord b) => (a -> b) -> [a] -> [[a]]
+sortAndGroup f = groupWith f . sortOn f
+
+groupKeysList :: (Eq k, Ord k) => [(k,a)] -> Map k [a]
+groupKeysList ys = fromList $ (\xs -> (fst $ head xs, snd <$> xs)) <$> sortAndGroup fst ys
+
+keyMap :: (Ord k') => (k -> k') -> Map k a -> Map k' [a]
+keyMap f m = groupKeysList $ (\(k,a) -> (f k,a)) <$> toList m
+
+invertMap :: (Ord a) => Map k a -> Map a [k]
+invertMap m = groupKeysList $ swap <$> toList m
+
+transposeMaps :: forall a b . (Ord b) => Map a (Map b Double) -> Map b (Map a Double)
+transposeMaps m =
   let allBs :: S.Set b
       allBs = S.unions $ keysSet <$> m
       indexb :: b -> Map b Double -> Double
@@ -81,54 +141,3 @@ invertMap m =
 -- one row of the table
 showRow :: (String,[(Hotspot, Double)]) -> String
 showRow (k,m) = concat $ intersperse "\t" $ k : (show <$> snd <$> m)
-
-hsAvg :: [(a,Double)] -> Double
-hsAvg xs = (sum $ snd <$> xs) / (fromIntegral $ length xs)
-
--- you probably want to sort your input first!
-groupWith :: (Eq b) => (a -> b) -> [a] -> [[a]]
-groupWith f = groupBy (\a b -> f a == f b)
-
-sortAndGroup :: (Eq b, Ord b) => (a -> b) -> [a] -> [[a]]
-sortAndGroup f = groupWith f . sortOn f
-
-showTable :: Map Hotspot (Map String Double) -> String
-showTable m = 
-  let header = concat $ intersperse "\t" $ "" : (show <$> keys m)
-      invLists = toList <$> invertMap m :: Map String [(Hotspot,Double)]
-      -- remove 0s from each row, and sort from largest to smallest
-      invLists' = reverse <$> sortOn snd <$> (filter ((/= 0) . snd)) <$> invLists :: Map String [(Hotspot,Double)]
-      invLists'' = sortAndGroup (length . snd) $ toList invLists' -- :: [[(String,[(Hotspot,Double)])]]
-      sortedGroups = concat $ reverse $ sortOn (length . snd . head) $ reverse <$> sortOn (hsAvg . snd) <$> invLists''
-      dataStrs = showRow <$> sortedGroups
-  in concat $ intersperse "\n" $ header : dataStrs
-
-
-
-
-
-
-{-
-  let sortedData = reverse $ dropWhile ((<0.25) . snd) $ sortOn snd $ toList m
-      strData = (show <$>) <$> sortedData
-      birdLines = concat <$> intersperse "\t" <$> (\(a,b)->[a,b]) <$> strData
-  in unlines birdLines
-
-
--- process all hotspots in one region and report the maximum 
--- probability of each bird at any of the hotspots, ignoring 
--- spots with only a few checklists for the target week
-processArea :: [String] -> IO (Map String Double)
-processArea hotspotIDs = do
-  -- create a map from hotspot ID to the processed data for that
-  -- hotspot (a map from bird name to probability for that bird 
-  -- in the first week of August)
-  hsMap <- sequence $ fromSet createHotspot $ S.fromList hotspotIDs
-  -- filter out hotspots which don't have enough checklists
-  largeHSMap <- filterSmallHotspots hsMap
-  -- merge the data from the remaining hotspots to find the maximum
-  -- probability for each bird at *any* hotspot in the region
-  let finalMap = unionsWith max largeHSMap
-  -- write the data to a file
-  return finalMap
--}

@@ -6,7 +6,7 @@ import qualified Codec.Binary.UTF8.String as U
 import qualified Data.ByteString.Lazy as C
 import Data.List (intersperse, sortOn, reverse, stripPrefix)
 import Data.Map hiding (drop, splitAt, take, map)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromJust)
 import Data.Tuple (swap)
 import Network.HTTP.Conduit
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -74,13 +74,13 @@ parseHistogram rawData =
   let rawData' = init $ init $ drop 14 $ lines rawData
       -- first line of rawData' has info about number of checklists for each week,
       -- followed by an empty line
-      checklistCount = snd $ parseHistLine $ head rawData'
+      checklistCount = snd $ fromJust $ parseHistLine $ head rawData'
       dataLines = drop 2 rawData'
   -- parse each line, dropping unwanted columns
   -- and convert to a map
-  in (round checklistCount, fromList $ parseHistLine <$> dataLines)
+  in (round checklistCount, fromList $ catMaybes $ parseHistLine <$> dataLines)
 
-parseHistLine :: String -> (String, Double)
+parseHistLine :: String -> Maybe (String, Double)
 parseHistLine str = 
   -- split the line into words
   let ws = words str
@@ -93,7 +93,9 @@ parseHistLine str =
            augVal = case mapM readMaybe $ (vals !!) <$> [26,27,28,29,30] of
                       Nothing -> error $ str
                       Just x -> maximum x
-       in (bird,augVal)
+       in if last birdname == "sp."
+          then Nothing
+          else Just (bird,augVal)
 
 hotspots :: IO [Hotspot]
 hotspots = do
