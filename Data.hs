@@ -5,7 +5,7 @@ module Data (nameMapping, readHistogram, Hotspot(..), hotspots) where
 import qualified Codec.Binary.UTF8.String as U
 import qualified Data.ByteString.Lazy as C
 import Data.List (intersperse, sortOn, reverse, stripPrefix)
-import Data.Map hiding (drop, splitAt, take, map)
+import Data.Map.Strict hiding (drop, splitAt, take, map)
 import Data.Maybe (catMaybes, fromJust)
 import Data.Tuple (swap)
 import Network.HTTP.Conduit
@@ -16,16 +16,18 @@ import Text.Read
 pathSep :: String
 pathSep = [pathSeparator]
 
+-- mapping of human-readable hotspot names to ebird hotspot IDs
 nameMapping :: IO (Map String String)
-nameMapping = do
+nameMapping =
   let dir = "data"
       filePath = "idmap.txt"
       url = "https://ebird.org/GuideMe?reportType=location&bMonth" ++
             "=08&bYear=1900&eMonth=08&eYear=2018&parentState=US-WA" ++
             "&countries=US&states=US-WA&getLocations=hotspots&" ++ 
             "continue.x=31&continue.y=6"
-  readOrDownload dir filePath parseHotspotMapping url
+  in readOrDownload dir filePath parseHotspotMapping url
 
+-- parse the mapping file
 parseHotspotMapping :: String -> Map String String
 parseHotspotMapping rawData =
   let rawData' = lines rawData
@@ -37,16 +39,18 @@ parseHotspotMapping rawData =
       parsedLines = swap <$> parseMapping <$> mapLines
   in fromList parsedLines
 
+-- a hotspot has a (custom-defined) region, name, and code
 data Hotspot = HS {region::String, hsName::String, code::String}
   deriving (Show,Ord,Eq)
 
-readHistogram :: Hotspot -> IO (Int,Map String Double)
-readHistogram HS{..} = do
+-- 
+readHistogram :: Int -> Hotspot -> IO (Int, Map String Double)
+readHistogram weekID HS{..} = do
   let dir = "data" ++ pathSep ++ region
       filePath = code ++ ".txt"
       url = "https://ebird.org/barchartData?r=" ++ code ++ 
             "&bmo=1&emo=12&byr=1900&eyr=2018&fmt=tsv"
-  readOrDownload dir filePath parseHistogram url
+  readOrDownload dir filePath (parseHistogram weekID) url
 
 readOrDownload :: String -> String -> (String -> a) -> String -> IO a
 readOrDownload dir filePath parse url = do
@@ -62,8 +66,11 @@ readOrDownload dir filePath parse url = do
       writeFile fullPath rawData
       return rawData
 
-parseHistogram :: String -> (Int, Map String Double)
-parseHistogram rawData = 
+-- takes the ID of the week to get data for.
+-- returns the number of checklists recorded in the given week for this hotspot,
+-- and a map from bird names to probability of that bird occuring on a checklist during that week
+parseHistogram :: Int -> String -> (Int, Map String Double)
+parseHistogram weekID rawData = 
   -- raw files include 14 lines of cruft
   -- then one blank line
   -- then the number of checklists for each month
@@ -74,26 +81,29 @@ parseHistogram rawData =
   let rawData' = init $ init $ drop 14 $ lines rawData
       -- first line of rawData' has info about number of checklists for each week,
       -- followed by an empty line
-      checklistCount = snd $ fromJust $ parseHistLine $ head rawData'
+      checklistCount = snd $ fromJust $ parseHistLine weekID $ head rawData'
       dataLines = drop 2 rawData'
   -- parse each line, dropping unwanted columns
   -- and convert to a map
-  in (round checklistCount, fromList $ catMaybes $ parseHistLine <$> dataLines)
+  in (round checklistCount, fromList $ catMaybes $ parseHistLine weekID <$> dataLines)
 
-parseHistLine :: String -> Maybe (String, Double)
-parseHistLine str = 
+-- parse one (data) line of a histogram
+-- the probability is the maximum of a three week period for the weeks surrounding the target week
+-- and we drop any lines corresponding to a 'sp.' bird or '/' bird (like western/Glaucous-winged gull)
+parseHistLine :: Int -> String -> Maybe (String, Double)
+parseHistLine weekID str = 
   -- split the line into words
   let ws = words str
   in if length ws < 49 -- one word name plus 48 data values
      then error $ "line too short!\n\n" ++ str
      else 
        let (birdname,vals) = splitAt (length ws - 48) ws
-           bird = concat $ intersperse "-" birdname
-           -- read the value for the first week of August
-           augVal = case mapM readMaybe $ (vals !!) <$> [26,27,28,29,30] of
+           bird = concat $ intersperse " " birdname
+           -- read the value for the specified week
+           augVal = case mapM readMaybe $ (vals !!) <$> [weekID-1,weekID,weekID+1] of
                       Nothing -> error $ str
                       Just x -> maximum x
-       in if last birdname == "sp."
+       in if last birdname == "sp." || elem '/' bird
           then Nothing
           else Just (bird,augVal)
 
