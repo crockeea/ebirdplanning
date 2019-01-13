@@ -8,8 +8,8 @@ import Control.Arrow ((***))
 import Control.Monad (join, when, void)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Char8 as C
-import Data.List (intersperse, sortOn, reverse, partition, stripPrefix, delete, filter, groupBy, dropWhile, reverse)
-import Data.Map.Strict hiding (splitAt,drop,map,take,delete,filter,partition)
+import Data.List (intersperse, sortOn, reverse, partition, stripPrefix, delete, filter, groupBy, dropWhile, reverse, (\\))
+import Data.Map.Strict hiding (splitAt,drop,map,take,delete,filter,partition,(\\))
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Tuple (swap)
@@ -90,7 +90,7 @@ regionalAnalysis weekID = do
     "\t+target " ++ show (length commonBirds + length targetBirds) ++
     "\t+rare " ++ show (length commonBirds + length targetBirds + length rareBirds)
   --showList "Vagrants" $ catMap ! Vagrant
-  showList "Common birds" commonBirds
+  showList "Common birds" (commonBirds \\ gaBirds)
   let bset = S.fromList $ targetBirds ++ rareBirds
   return $ updateKeys region $ flip restrictKeys bset <$> compressedHists
 
@@ -109,25 +109,8 @@ categorize probs =
       | x < 5     -> Target
       | otherwise -> Common
 
--- given a list sorted from largest to smallest on the Double value,
--- return a prefix where the Doubles sum to just over half of the total input weight
-halfMass :: [(Hotspot,Double)] -> [(Hotspot,Double)]
-halfMass xs =
-  let mass = sum $ snd <$> xs
-      hmass = mass / 2
-      incrementalSums = 
-        (\i -> mass - (sum $ snd <$> take i xs)) <$> [1..(length xs)]
-  in zipWith const xs $ takeWhile (>=hmass) incrementalSums
-
 type RegionName = String
 type BirdName = String
-
--- for each bird, output the regions where we should target it
-computeTargetLocs :: [(Hotspot,Double)] -> [RegionName]
-computeTargetLocs xs =
-  let -- sort from largest to smallest
-      filtered = reverse $ sortOn snd xs
-  in (region . fst) <$> halfMass filtered
 
 filterLowProbRegions :: [(RegionName, Double)] -> [(RegionName, Double)]
 filterLowProbRegions xs = 
@@ -141,16 +124,15 @@ main = do
   --mapM_ regionalAnalysis [24..28]
   compressedHists <- regionalAnalysis 28
 
-  let birdMap = filterLowProbRegions <$> toList <$> transposeMaps compressedHists :: Map BirdName [(RegionName,Double)]
+  let birdMap = flip withoutKeys (S.fromList gaBirds) $ filterLowProbRegions <$> toList <$> transposeMaps compressedHists :: Map BirdName [(RegionName,Double)]
       -- remove regions with lower probability
       birdMap' = transposeMaps $ fromList <$> birdMap
       birdMap'' = keys <$> birdMap' :: Map RegionName [BirdName]
 
   void $ sequence $ mapWithKey showList birdMap''
   
-  let str = showTable birdMap'
-  writeFile "out.txt" str
-  --putStrLn "done"
+  --let str = showTable birdMap'
+  --writeFile "out.txt" str
 
 showTable :: Map RegionName (Map BirdName Double) -> String
 showTable m = 
@@ -173,10 +155,10 @@ showRow (k,m) = concat $ intersperse "\t" $ k : (show <$> snd <$> m)
 
 -- helper functions
 
-showList :: (Show a) => String -> [a] -> IO ()
+showList :: String -> [String] -> IO ()
 showList str as = do
   when (str /= "") $ putStrLn str
-  mapM_ (putStrLn . show) as
+  mapM_ (putStrLn) as
   putStrLn "\n\n"
 
 groupKeysList :: (Eq k, Ord k) => [(k,a)] -> Map k [a]
@@ -186,10 +168,8 @@ transposeMaps :: forall a b c . (Ord b, Num c) => Map a (Map b c) -> Map b (Map 
 transposeMaps m =
   let allBs :: S.Set b
       allBs = S.unions $ keysSet <$> m
-      indexb :: b -> Map b c -> c
-      indexb b m = case lookup b m of Nothing -> 0; (Just x) -> x
       bmap :: b -> Map a c
-      bmap b = indexb b <$> m
+      bmap b = mapMaybe (lookup b) m
   in fromSet bmap allBs
 
 invertMap :: (Ord a) => Map k [a] -> Map a [k]

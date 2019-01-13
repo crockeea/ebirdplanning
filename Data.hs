@@ -1,6 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
 
-module Data (nameMapping, readHistogram, Hotspot(..), hotspots) where
+module Data (nameMapping, readHistogram, Hotspot(..), hotspots, gaBirds) where
 
 import qualified Codec.Binary.UTF8.String as U
 import qualified Data.ByteString.Lazy as C
