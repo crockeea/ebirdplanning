@@ -61,38 +61,34 @@ histograms weekID = do
 
 -- merges all hotspots in a region into a single "regional hotspot", 
 -- using the maximum probabilty in any hotspot in the region.
--- only returns "target" or "rare" birds for the region
-regionalAnalysis :: Int -> IO (Map RegionName (Map BirdName Double))
-regionalAnalysis weekID = do
-  hist <- histograms weekID
+regionalAnalysis :: Map Hotspot (Map BirdName Double) -> Map RegionName (Map BirdName Double)
+regionalAnalysis hist =
   -- group histograms by region
   -- already sorted using `toList`, so no need to resort. Just group.
   let histGroups = groupWith (region . fst) $ toList hist :: [[(Hotspot,Map BirdName Double)]]
       -- given a list of (Hotspot, Map BirdName Double) pairs, where all hotspots are in the same region,
       -- returns a single pair (Hotspot, Map BirdName Double) where the probability for each bird is the
       -- maximum of all hotspots in the region
+      compressRegion :: [(Hotspot,Map BirdName Double)] -> (RegionName, Map BirdName Double)
       compressRegion regMaps =
-        let regionRepr = fst $ head regMaps
-            mapsOnly = snd <$> regMaps
-        in (regionRepr, unionsWith max mapsOnly) :: (Hotspot,Map BirdName Double)
+        let regionRepr = region $ fst $ head regMaps
+            mapsOnly = snd <$> regMaps :: [Map BirdName Double]
+        in (regionRepr, unionsWith max mapsOnly) :: (RegionName,Map BirdName Double)
       -- we treat each region as the (maximum for each bird) union of all of its hotspots
-      compressedHists = fromList $ compressRegion <$> histGroups :: Map Hotspot (Map BirdName Double)
-      -- a map from birds to their probability for each hotspot
-      birdMap = transposeMaps compressedHists :: Map BirdName (Map Hotspot Double)
+  in fromList $ compressRegion <$> histGroups
+
+categorize :: Map RegionName (Map BirdName Double) -> Map Category [BirdName]
+categorize regList = 
+  -- a map from birds to their probability for each hotspot
+  let birdMap = transposeMaps regList :: Map BirdName (Map RegionName Double)
+      categorize' probs = 
+        case sum $ snd <$> probs of
+          x | x < 0.1   -> Vagrant
+            | x < 0.34  -> Rare
+            | x < 5     -> Target
+            | otherwise -> Common
       -- categorize each bird by its probability of being seen in *any* region
-      catMap = invertMap $ ((:[]) . categorize . toList) <$> birdMap
-  let commonBirds = catMap ! Common
-      targetBirds = catMap ! Target
-      rareBirds = catMap ! Rare
-      --vagrantBirds = catMap ! Vagrant
-  putStrLn $ "week " ++ show weekID ++ ":" ++
-    "\tcommon " ++ show (length commonBirds) ++
-    "\t+target " ++ show (length commonBirds + length targetBirds) ++
-    "\t+rare " ++ show (length commonBirds + length targetBirds + length rareBirds)
-  --showList "Vagrants" $ catMap ! Vagrant
-  showList "Common birds" (commonBirds \\ gaBirds)
-  let bset = S.fromList $ targetBirds ++ rareBirds
-  return $ updateKeys region $ flip restrictKeys bset <$> compressedHists
+  in invertMap $ ((:[]) . categorize' . toList) <$> birdMap :: Map Category [BirdName]
 
 data Category =
   Common
@@ -100,14 +96,6 @@ data Category =
   | Rare
   | Vagrant
   deriving (Ord,Show,Eq)
-
-categorize :: [(Hotspot, Double)] -> Category
-categorize probs = 
-  case sum $ snd <$> probs of
-    x | x < 0.1   -> Vagrant
-      | x < 0.34  -> Rare
-      | x < 5     -> Target
-      | otherwise -> Common
 
 type RegionName = String
 type BirdName = String
@@ -117,20 +105,62 @@ filterLowProbRegions xs =
   let maxProb = maximum $ snd <$> xs
   in filter (\(_,y) ->  y > (maxProb * 0.75)) xs
 
+computeTargets :: Map RegionName (Map BirdName Double) -> Map RegionName [BirdName]
+computeTargets regionalProbMap =
+  let birdMap = flip withoutKeys (S.fromList gaBirds) $ 
+        filterLowProbRegions <$> toList <$> transposeMaps regionalProbMap :: Map BirdName [(RegionName,Double)]
+      -- remove regions with lower probability
+      birdMap' = transposeMaps $ fromList <$> birdMap
+  in keys <$> birdMap' :: Map RegionName [BirdName]
+
+-- given a target bird in a particular region,
+-- look at the probability of that bird for all hotspots in the region
+-- and output a list which includes the top 10 percent of hotspots
+likelyHotspots :: Map BirdName (Map Hotspot Double) -> Map RegionName [BirdName] -> Map RegionName (Map BirdName [Hotspot])
+likelyHotspots rawHist targetBirds = mapWithKey go targetBirds
+  where 
+    go :: RegionName -> [BirdName] -> Map BirdName [Hotspot]
+    go r bs = 
+      let m = (filterWithKey $ \h _ -> region h == r) <$> rawHist
+      in fromSet (go' m) (S.fromList bs)
+
+    go' :: Map BirdName (Map Hotspot Double) -> BirdName -> [Hotspot]
+    go' m b =
+      let hsMap = m ! b
+          probs = elems hsMap
+          maxProb = maximum probs
+          hsMap' = M.filter (> 0.8*maxProb) hsMap
+      in keys hsMap'
+
 main :: IO ()
 main = do
   -- the ebird data files contain utf8 characters. This ensures that Haskell handles them properly.
   setLocaleEncoding utf8
   --mapM_ regionalAnalysis [24..28]
-  compressedHists <- regionalAnalysis 28
+  let weekID = 28 -- first week of August
+  rawHistogram <- histograms weekID
 
-  let birdMap = flip withoutKeys (S.fromList gaBirds) $ filterLowProbRegions <$> toList <$> transposeMaps compressedHists :: Map BirdName [(RegionName,Double)]
-      -- remove regions with lower probability
-      birdMap' = transposeMaps $ fromList <$> birdMap
-      birdMap'' = keys <$> birdMap' :: Map RegionName [BirdName]
+  -- the probability that a bird is seen in a particular region
+  let regionalBirdProbs = regionalAnalysis rawHistogram
 
-  void $ sequence $ mapWithKey showList birdMap''
-  
+  -- categorize each bird as "common" "target" etc based on the probability it
+  -- will be seen in *any* region during the entire trip
+  let birdCats = categorize regionalBirdProbs
+
+  putStrLn $ "week " ++ show weekID ++ ":" ++
+    "\tcommon " ++ show (length $ birdCats ! Common) ++
+    "\t+target " ++ show (length $ birdCats ! Target) ++
+    "\t+rare " ++ show (length $ birdCats ! Rare)
+
+  showList "Common birds" $ birdCats ! Common
+
+  -- compute target birds for each region, but don't count birds which should
+  -- be "common" on our trip
+  let bset = S.fromList $ (birdCats ! Target) ++ (birdCats ! Rare)
+      uncommonHist = flip restrictKeys bset <$> regionalBirdProbs
+      targetBirds = computeTargets uncommonHist
+  void $ sequence $ mapWithKey showList targetBirds
+
   --let str = showTable birdMap'
   --writeFile "out.txt" str
 
@@ -157,7 +187,7 @@ showRow (k,m) = concat $ intersperse "\t" $ k : (show <$> snd <$> m)
 
 showList :: String -> [String] -> IO ()
 showList str as = do
-  when (str /= "") $ putStrLn str
+  when (str /= "") $ putStrLn $ show (length as) ++ " " ++ str
   mapM_ (putStrLn) as
   putStrLn "\n\n"
 
