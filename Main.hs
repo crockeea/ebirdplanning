@@ -1,14 +1,15 @@
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
-
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE FlexibleContexts    #-}
 import Data
 
 import Control.Arrow ((***))
 import Control.Monad (join, when, void)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Char8 as C
-import Data.List (intersperse, sortOn, reverse, partition, stripPrefix, delete, filter, groupBy, dropWhile, reverse, (\\))
+import Data.List (intersperse, sortOn, reverse, nub, partition, stripPrefix, delete, filter, groupBy, dropWhile, reverse, (\\))
 import Data.Map.Strict hiding (splitAt,drop,map,take,delete,filter,partition,(\\))
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -51,12 +52,8 @@ histograms weekID = do
         join (***) (S.unions . map (keysSet . snd)) volHSs
       -- loVolKeys is the set of all birds seen at low-volume hotspots
       loVolOnly = loVolKeys S.\\ hiVolKeys
-  putStrLn $ "Number of birds only seen at low-volume hotspots: " ++ show (length loVolOnly)
-  showList "" $ S.toList loVolOnly
-  --let loVolRare = filter (not . null . snd) $ map (flip restrictKeys loVolOnly <$>) loVolMaps
-      -- adjust bird name to indicate a rarity
-  --    loVolRare' = (updateKeys ("RARE: "++) <$>) <$> loVolRare
-  --    largeMaps = concat $ snd <$> sortedGroups
+  --putStrLn $ "Number of birds only seen at low-volume hotspots: " ++ show (length loVolOnly)
+  --putStrLn $ showList "" $ S.toList loVolOnly
   return $ fromList $ hiVolMaps -- loVolRare' -- ++ 
 
 -- merges all hotspots in a region into a single "regional hotspot", 
@@ -82,13 +79,16 @@ categorize regList =
   -- a map from birds to their probability for each hotspot
   let birdMap = transposeMaps regList :: Map BirdName (Map RegionName Double)
       categorize' probs = 
-        case sum $ snd <$> probs of
-          x | x < 0.1   -> Vagrant
-            | x < 0.34  -> Rare
-            | x < 5     -> Target
-            | otherwise -> Common
+        let m = maximum probs
+        in if sum probs > 5
+           then Common
+           else if m > 0.5
+           then Target
+           else if m > 0.25
+           then Rare
+           else Vagrant
       -- categorize each bird by its probability of being seen in *any* region
-  in invertMap $ ((:[]) . categorize' . toList) <$> birdMap :: Map Category [BirdName]
+  in invertMap $ ((:[]) . categorize' . elems) <$> birdMap :: Map Category [BirdName]
 
 data Category =
   Common
@@ -100,14 +100,11 @@ data Category =
 type RegionName = String
 type BirdName = String
 
-filterLowProbRegions :: [(RegionName, Double)] -> [(RegionName, Double)]
-filterLowProbRegions xs = 
-  let maxProb = maximum $ snd <$> xs
-  in filter (\(_,y) ->  y > (maxProb * 0.75)) xs
-
 computeTargets :: Map RegionName (Map BirdName Double) -> Map RegionName [BirdName]
 computeTargets regionalProbMap =
-  let birdMap = flip withoutKeys (S.fromList gaBirds) $ 
+  let filterLowProbRegions :: [(RegionName, Double)] -> [(RegionName, Double)]
+      filterLowProbRegions xs = filter (\(_,y) ->  y > ((maximum $ snd <$> xs) * 0.75)) xs
+      birdMap = flip withoutKeys (S.fromList gaBirds) $ 
         filterLowProbRegions <$> toList <$> transposeMaps regionalProbMap :: Map BirdName [(RegionName,Double)]
       -- remove regions with lower probability
       birdMap' = transposeMaps $ fromList <$> birdMap
@@ -116,21 +113,34 @@ computeTargets regionalProbMap =
 -- given a target bird in a particular region,
 -- look at the probability of that bird for all hotspots in the region
 -- and output a list which includes the top 10 percent of hotspots
-likelyHotspots :: Map BirdName (Map Hotspot Double) -> Map RegionName [BirdName] -> Map RegionName (Map BirdName [Hotspot])
+likelyHotspots :: Map BirdName (Map Hotspot Double) 
+  -> Map RegionName [BirdName] 
+  -> Map RegionName (Map BirdName (Map Hotspot Double))
 likelyHotspots rawHist targetBirds = mapWithKey go targetBirds
   where 
-    go :: RegionName -> [BirdName] -> Map BirdName [Hotspot]
+    go :: RegionName -> [BirdName] -> Map BirdName (Map Hotspot Double)
     go r bs = 
       let m = (filterWithKey $ \h _ -> region h == r) <$> rawHist
       in fromSet (go' m) (S.fromList bs)
 
-    go' :: Map BirdName (Map Hotspot Double) -> BirdName -> [Hotspot]
+    go' :: Map BirdName (Map Hotspot Double) -> BirdName -> Map Hotspot Double
     go' m b =
       let hsMap = m ! b
           probs = elems hsMap
           maxProb = maximum probs
-          hsMap' = M.filter (> 0.8*maxProb) hsMap
-      in keys hsMap'
+      in M.filter (> 0.8*maxProb) hsMap
+
+targetHotspots :: Map RegionName (Map BirdName (Map Hotspot Double))
+  -> Int
+  -> Map RegionName [Hotspot]
+targetHotspots likelyHSs hsPerBird = go <$> likelyHSs
+  where
+    go :: Map BirdName (Map Hotspot Double) -> [Hotspot]
+    go m = 
+      let hss = elems m :: [Map Hotspot Double]
+      in nub $ concat $ go' <$> hss
+    go' :: Map Hotspot Double -> [Hotspot]
+    go' = map fst . take hsPerBird . reverse . sortOn snd . toList
 
 main :: IO ()
 main = do
@@ -152,15 +162,50 @@ main = do
     "\t+target " ++ show (length $ birdCats ! Target) ++
     "\t+rare " ++ show (length $ birdCats ! Rare)
 
-  showList "Common birds" $ birdCats ! Common
+  putStrLn $ showList "Common birds" $ birdCats ! Common
 
   -- compute target birds for each region, but don't count birds which should
   -- be "common" on our trip
-  let bset = S.fromList $ (birdCats ! Target) ++ (birdCats ! Rare)
-      uncommonHist = flip restrictKeys bset <$> regionalBirdProbs
+  let uncommonHist = flip withoutKeys (S.fromList $ birdCats ! Vagrant ++ birdCats ! Common) <$> regionalBirdProbs
       targetBirds = computeTargets uncommonHist
-  void $ sequence $ mapWithKey showList targetBirds
+  void $ sequence $ mapWithKey (\h a -> putStrLn $ showList h a) targetBirds
 
+  -- likely hotspots
+  let likelyHSs = 
+        likelyHotspots (transposeMaps rawHistogram) targetBirds :: Map RegionName (Map BirdName (Map Hotspot Double))
+      likelyHSs' = transposeMaps <$> likelyHSs :: Map RegionName (Map Hotspot (Map BirdName Double))
+      likelyHSs'' = updateKeys hsName <$> likelyHSs'
+
+  let x = showMap "target hotspots" $ likelyHSs''
+  putStrLn x
+
+
+  -- let hsOrder = 
+  --   ["Port Townsend ferry terminal"
+  --   ,"Port Townsend-Keystone Ferry (Island Co.)"
+  --   ,"Port Townsend-Keystone Ferry (Jefferson Co.)"
+  --   ,"Keystone Ferry Landing"
+  --   ,"Fort Casey State Park"
+  --   ,"Crockett Lake"
+  --   ,"Fort Ebey State Park"
+  --   ,"Hastie Lake Rd beach access"
+  --   ,"Swantown / Bos Lake"
+  --   ,"Libbey Beach County Park"
+  --   ,"Dugualla Bay"
+  --   ,"Deception Pass SP"
+  --   ,"Deception Pass SP -- North Beach"
+  --   ,"Deception Pass SP -- West Beach"
+  --   ]
+
+  --putStrLn $ showMap "Whidbey Island" $ withoutKeys (likelyHSs'' ! "Whidbey Island") $ fromList ["Deception Pass SP -- North Beach"]
+
+  
+  -- putStrLn $ showMap "1" $ length <$> targetHotspots likelyHSs 1
+  -- putStrLn $ showMap "2" $ length <$> targetHotspots likelyHSs 2
+  -- putStrLn $ showMap "3" $ length <$> targetHotspots likelyHSs 3
+  -- putStrLn $ showMap "4" $ length <$> targetHotspots likelyHSs 4
+
+  -- putStrLn $ showMap "20" $ length <$> targetHotspots likelyHSs 20
   --let str = showTable birdMap'
   --writeFile "out.txt" str
 
@@ -185,11 +230,26 @@ showRow (k,m) = concat $ intersperse "\t" $ k : (show <$> snd <$> m)
 
 -- helper functions
 
-showList :: String -> [String] -> IO ()
-showList str as = do
-  when (str /= "") $ putStrLn $ show (length as) ++ " " ++ str
-  mapM_ (putStrLn) as
-  putStrLn "\n\n"
+class ShowMap a where
+  showMap' :: Int -> a -> [String]
+
+instance {-# OVERLAPS #-} (Show a) => ShowMap (Map String a) where
+  showMap' indent = map (\(k,v) -> concat (replicate indent "\t") ++ k ++ concat (replicate (40-length k) " ") ++ show v) . toList
+
+instance (ShowMap (Map b c)) => ShowMap (Map String (Map b c)) where
+  showMap' indent m =
+    let m' = showMap' (indent+1) <$> m
+        f k strs = showList (concat (replicate indent "\t") ++ k) strs
+    in map (uncurry f) $ toList m'
+
+showMap :: (ShowMap a) => String -> a -> String
+showMap hdr = showList hdr . showMap' 1
+
+showList :: String -> [String] -> String
+showList str as = 
+  let h = if (str /= "") then str ++ " " ++ show (length as) else ""
+      vals = concat $ intersperse "\n" as
+  in h ++ "\n" ++ vals ++ "\n"
 
 groupKeysList :: (Eq k, Ord k) => [(k,a)] -> Map k [a]
 groupKeysList ys = fromList $ (\xs -> (fst $ head xs, snd <$> xs)) <$> sortAndGroup fst ys

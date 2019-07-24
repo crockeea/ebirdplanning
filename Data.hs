@@ -13,6 +13,10 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath.Posix (pathSeparator)
 import Text.Read
 
+-- a hotspot has a (custom-defined) region, name, and code
+data Hotspot = HS {region::String, hsName::String, code::String}
+  deriving (Show,Ord,Eq)
+
 pathSep :: String
 pathSep = [pathSeparator]
 
@@ -35,13 +39,9 @@ parseHotspotMapping rawData =
       mapLines = catMaybes $ (stripPrefix mapLinePrefix) <$> rawData'
       parseMapping str = 
         let (lhs,rhs) = span (/= '\"') str
-        in (lhs, drop 4 $ take (length rhs - 5) rhs)
+        in (lhs, drop 4 $ take (length rhs - 6) rhs)
       parsedLines = swap <$> parseMapping <$> mapLines
   in fromList parsedLines
-
--- a hotspot has a (custom-defined) region, name, and code
-data Hotspot = HS {region::String, hsName::String, code::String}
-  deriving (Show,Ord,Eq)
 
 -- 
 readHistogram :: Int -> Hotspot -> IO (Int, Map String Double)
@@ -50,6 +50,7 @@ readHistogram weekID HS{..} = do
       filePath = code ++ ".txt"
       url = "https://ebird.org/barchartData?r=" ++ code ++ 
             "&bmo=1&emo=12&byr=1900&eyr=2018&fmt=tsv"
+  --putStrLn dir
   readOrDownload dir filePath (parseHistogram weekID) url
 
 readOrDownload :: String -> String -> (String -> a) -> String -> IO a
@@ -115,15 +116,15 @@ hotspots = do
         then HS{code=nameMap!hsName,..}
         else error hsName
       regionList = [
-       ("neahBay", neahBay),
-       ("portAngeles", portAngeles),
-       ("lakeCrescent", lakeCrescent),
-       ("highOlympics", highOlympics),
-       ("portTownsend", portTownsend),
-       ("kitsapPeninsula", kitsapPeninsula),
-       ("whidbeyIsland", whidbeyIsland),
-       ("discoveryBay", discoveryBay),
-       ("dungeness", dungeness)]
+       ("Neah Bay", neahBay),
+       ("Port Angeles", portAngeles),
+       ("Lake Crescent", lakeCrescent),
+       ("High Olympics", highOlympics),
+       ("Port Townsend", portTownsend),
+       ("Kitsap Peninsula", kitsapPeninsula),
+       ("Whidbey Island", whidbeyIsland),
+       ("Discovery Bay", discoveryBay),
+       ("Dungeness", dungeness)]
   return $ concatMap (\(str,lst) -> nameToHS str <$> lst) regionList
 
 neahBay :: [String]
@@ -346,7 +347,7 @@ whidbeyIsland :: [String]
 whidbeyIsland = [
   "Port Townsend-Keystone Ferry (Jefferson Co.)",
   "Port Townsend-Keystone Ferry (Island Co.)",
-  "Port Townsend-Keystone Ferry (Island Co.)",
+  "Port Townsend ferry terminal",
   "Keystone Ferry Landing",
   "Fort Casey State Park",
   "Crockett Lake",
